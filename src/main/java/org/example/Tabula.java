@@ -5,14 +5,19 @@ import technology.tabula.extractors.SpreadsheetExtractionAlgorithm;
 import org.apache.pdfbox.pdmodel.PDDocument;
 
 import java.io.File;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 public class Tabula {
     public static void main(String[] args) {
         File file = new File("./files/Maples+Group+-+Transfer+Agent+FAQ+-+August+2023.pdf");
-        try (PDDocument document = PDDocument.load(file)) {
+        File outputFile = new File("test.md");
+        try (PDDocument document = PDDocument.load(file);
+             FileWriter writer = new FileWriter(outputFile)) {
+
             ObjectExtractor extractor = new ObjectExtractor(document);
             PageIterator pageIterator = extractor.extract();
 
@@ -23,9 +28,10 @@ public class Tabula {
                 List<Table> tables = algorithm.extract(page);
 
                 for (Table table : tables) {
-                    System.out.println("## Page: " + pageNumber);
-                    System.out.println();
-                    System.out.println(convertTableToMarkdown(table));
+                    if (pageNumber == 8) {
+                        writer.write("## Page: " + pageNumber + "\n");
+                        writer.write(convertTableToMarkdown(table));
+                    }
                 }
             }
         } catch (IOException e) {
@@ -40,39 +46,34 @@ public class Tabula {
         List<List<RectangularTextContainer>> rows = table.getRows();
 
         // Determine the number of columns based on the first row
-        int columnCount = rows.isEmpty() ? 0 : rows.get(0).size();
-        List<RectangularTextContainer> firstCells = new ArrayList<>();
+        List<RectangularTextContainer> firstRow = new ArrayList<>();
+        boolean isFirstRow = false;
         // Process each row
         for (int i = 0; i < rows.size(); i++) {
             List<RectangularTextContainer> cells = cleanColumns(rows.get(i));
 
-            if (i == 0) {
-                firstCells = cells;
+            if (firstRow.isEmpty() && !cells.isEmpty()) {
+                firstRow = cells;
+                isFirstRow = true;
             }
             if (cells.size() > 1) {
-                boolean textVisit = false;
                 // Convert row to Markdown
                 for (int j = 0; j < cells.size(); j++) {
                     RectangularTextContainer currentCell = cells.get(j);
-                    if (j < cells.size()) {
-                        // Concatenate text fragments inside the same cell
-                        String cellText = currentCell.getText().trim().replaceAll("\\r", " ");
-                        if (j >= firstCells.size()) {
-                            markdown.append(" ").append(cellText);
-                        } else {
-                            markdown.append("| ").append(cellText).append(" ");
-                        }
+                    // Concatenate text fragments inside the same cell
+                    String cellText = currentCell.getText().trim().replaceAll("\\r", " ");
+                    if (j >= firstRow.size()) {
+                        markdown.append(" ").append(cellText);
                     } else {
-                        markdown.append("| "); // empty cell
+                        markdown.append("| ").append(cellText).append(" ");
                     }
                 }
                 markdown.append("|\n");
 
                 // Add header separator after the first row
-                if (i == 0) {
-                    for (int j = 0; j < cells.size(); j++) {
-                        markdown.append("|---");
-                    }
+                if (isFirstRow) {
+                    markdown.append("|---".repeat(cells.size()));
+                    isFirstRow = false;
                     markdown.append("|\n");
                 }
             }
@@ -93,6 +94,9 @@ public class Tabula {
                 visitText = true;
                 cleanColumns.add(cells.get(i));
             }
+        }
+        if (!visitText) {
+            return Collections.emptyList();
         }
         return cleanColumns;
     }
