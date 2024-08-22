@@ -8,7 +8,7 @@ import java.util.*;
 
 public class PdfWriter {
     public static void main(String[] args) throws IOException {
-        String fileName = "Maples+Group+-+Transfer+Agent+FAQ+-+August+2023.pdf";
+        String fileName = args[0];
         PDDocument document = PDDocument.load(new File("./files/" + fileName));
         File outputFile = new File("./output/" + fileName.replaceAll(".pdf", ".md"));
         try(FileWriter writer = new FileWriter(outputFile)) {
