@@ -2,7 +2,6 @@ package org.example;
 import java.awt.geom.Rectangle2D;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -37,7 +36,7 @@ public class PdfTextExtractor {
     // Levenshtein distance calculator for string similarity
     private static final LevenshteinDistance levenshteinDistance = new LevenshteinDistance();
     private static final boolean convertTableToReadableFormat = true;
-    private static final boolean withHeader = false;
+    private static final boolean withHeader = true;
 
     public List<FilePage> extract(PDDocument document, boolean cleanPages) throws IOException {
         ObjectExtractor extractor = new ObjectExtractor(document);
@@ -231,90 +230,66 @@ public class PdfTextExtractor {
     }
 
     private List<PdfTable> extractTablesFromPdfPage(Page page) {
-
         SpreadsheetExtractionAlgorithm algorithm = new SpreadsheetExtractionAlgorithm();
         List<Table> tables = algorithm.extract(page);
         List<PdfTable> pdfTables = new ArrayList<>();
-        for (Table table: tables) {
-            // Skip not valid tables
+
+        for (Table table : tables) {
+            // Skip invalid tables
             if (!isValidTable(table)) {
                 continue;
             }
-            PdfTable pdfTable = new PdfTable();
-            StringBuilder tableStr = new StringBuilder();
-            List<List<RectangularTextContainer>> rows = cleanTable(table);
 
-            // Set the bounding box of the table
+            // Clean up the table (remove empty columns)
+            List<List<RectangularTextContainer>> rows = cleanTable(table);
+            if (rows.isEmpty()) continue;
+
+            PdfTable pdfTable = new PdfTable();
+
             RectangularTextContainer firstCell = rows.get(0).get(0);
             RectangularTextContainer lastCell = findLastCell(rows);
-
             if (lastCell == null) continue;
 
-            pdfTable.setStartX(firstCell.x);
-            pdfTable.setStartY(firstCell.y);
-            pdfTable.setEndX(lastCell.x + lastCell.width);
-            pdfTable.setEndY(lastCell.y + lastCell.height);
+            // Set the bounding box coordinates for the PdfTable
+            pdfTable.setStartX((float) firstCell.getX());
+            pdfTable.setStartY((float) firstCell.getY());
+            pdfTable.setEndX((float) (lastCell.getX() + lastCell.getWidth()));
+            pdfTable.setEndY((float) (lastCell.getY() + lastCell.getHeight()));
 
-            List<RectangularTextContainer> firstRow = new ArrayList<>();
-            boolean isFirstRow = false;
+            StringBuilder tableStr = new StringBuilder();
+            boolean isFirstRow = true;
+
             for (List<RectangularTextContainer> row : rows) {
+                if (row.isEmpty()) continue;
 
-                if (firstRow.isEmpty() && !row.isEmpty()) {
-                    firstRow = row;
-                    isFirstRow = true;
-                }
-                boolean rowEnd = false;
-                for (int j = 0; j < row.size(); j++) {
-                    rowEnd = true;
-
-                    RectangularTextContainer currentCell = row.get(j);
-
-                    // Check cell coordinates
-                    CellInfo firstRowCell = getCellByX(currentCell.x, firstRow);
-                    String cellText = currentCell.getText().replaceAll("\\r", " ");
-                    if (firstRowCell != null && currentCell instanceof Cell) {
-                        if (firstRowCell.getIndex() != j) {
-                            int diff = firstRowCell.getIndex() - j;
-                            if (diff > 0) {
-                                tableStr.append("| ".repeat(diff + 1)).append(cellText).append(" ");
-                            } else {
-                                tableStr.append("| ").append(cellText).append("| ".repeat(Math.abs(diff))).append(" ");
-                            }
-
-                        } else {
-                            tableStr.append("| ").append(cellText).append(" ");
-                        }
-
-                    } else {
-                        if (getRowWidth(row) == getRowWidth(firstRow)) {
-                            tableStr.append("| ").append(cellText).append(" ");
-                        } else {
-                            rowEnd = false;
-                            if (!cellText.isEmpty()) {
-                                tableStr.append(cellText);
-                            }
-                        }
-
+                appendRowToTableString(tableStr, row);
+                if (isFirstRow) {
+                    if (withHeader) {
+                        appendHeaderSeparator(tableStr, row.size());
                     }
-
-                }
-                if (rowEnd && !row.isEmpty()) {
-                    tableStr.append("|\n");
-                }
-
-                if (withHeader && isFirstRow) {
-                    tableStr.append("|---".repeat(cleanRow(firstRow).size()));
                     isFirstRow = false;
-                    tableStr.append("|\n");
                 }
-
             }
+
             pdfTable.setText(tableStr.toString());
             pdfTables.add(pdfTable);
-
         }
+
         return pdfTables;
     }
+
+    private void appendRowToTableString(StringBuilder tableStr, List<RectangularTextContainer> row) {
+        for (RectangularTextContainer cell : row) {
+            String cellText = cell.getText().replaceAll("\\r", " ");
+            tableStr.append("| ").append(cellText).append(" ");
+        }
+        tableStr.append("|\n");
+    }
+
+    private void appendHeaderSeparator(StringBuilder tableStr, int columnCount) {
+        tableStr.append("|---".repeat(columnCount)).append("|\n");
+    }
+
 
     private float getRowWidth(List<RectangularTextContainer> row) {
         float rowWidth = 0;
