@@ -1,22 +1,18 @@
 package org.example;
 import java.awt.geom.Rectangle2D;
-import java.io.FileInputStream;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import lombok.*;
-import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.pdmodel.PDPage;
-import org.apache.pdfbox.pdmodel.font.PDType0Font;
+import org.apache.pdfbox.pdmodel.PDPageContentStream;
+import org.apache.pdfbox.pdmodel.font.PDType1Font;
 import org.apache.pdfbox.pdmodel.interactive.annotation.PDAnnotation;
 import org.apache.pdfbox.pdmodel.interactive.annotation.PDAnnotationWidget;
 import org.apache.pdfbox.pdmodel.interactive.form.*;
+import org.apache.pdfbox.util.Matrix;
 import technology.tabula.*;
 import technology.tabula.extractors.ExtractionAlgorithm;
 import technology.tabula.extractors.SpreadsheetExtractionAlgorithm;
@@ -49,171 +45,153 @@ public class PdfTextExtractor {
     private static final boolean tablesWithHeader = true;
     private final PDFTextStripperByArea stripperByArea;
     private final PDDocument document;
+    private final PDRectangle mediaBox;
     private final ExtractionAlgorithm tableExtractionAlgorithm;
-    private List<Field> notFlattenFields = new ArrayList<>();
-    Map<String, Field> formData = new HashMap<>();
+    private final Map<String, Field> formData = new HashMap<>();
+    private final String FORM_DATA_PREFIX = ".)-&f*?5%f"; // Prefix for generating unique identifiers
+    private final String QUESTION_START_PREFIX = "#%*&q1v1\r";
+    private final boolean isSselDocument;
 
     public PdfTextExtractor(PDDocument document) throws IOException {
         this.document = document;
         this.stripperByArea = new PDFTextStripperByArea();
         this.tableExtractionAlgorithm = new SpreadsheetExtractionAlgorithm().withMinSpacingBetweenRulings(MIN_TABLE_CELL_HEIGHT_AND_WIDTH);
+        this.mediaBox = document.getPage(0).getMediaBox();
+        this.isSselDocument = hasTableOfContentPage() && hasTableOfContentPage();
+    }
+
+    public boolean isSselDocument() {
+        return isSselDocument;
+    }
+
+    private boolean hasTableOfContentPage() {
+        String pageText = getPdfPageText(3);
+        return pageText.startsWith("TABLE OF CONTENTS");
+    }
+
+    public String getQuestionStartPrefix() {
+        return QUESTION_START_PREFIX;
+    }
+
+    private final List<String> PROJECT_DETAILS_COLUMNS = List.of("Project Title", "Status", "Author", "Response Deadline", "Created", "Published", "Visibility", "Categories", "Scoring Formula", "Synopsis");
+    private boolean hasProjectDetailsPage() {
+        ObjectExtractor extractor = new ObjectExtractor(document);
+        Page page = extractor.extract(2);
+        List<Table> tables = (List<Table>) tableExtractionAlgorithm.extract(page);
+        if (tables.size() != 1) return false;
+        Table table = tables.get(0);
+        List<Boolean> columns = new ArrayList<>(Collections.nCopies(PROJECT_DETAILS_COLUMNS.size(), false));
+        for (int i = 0; i < table.getRows().size(); i++) {
+            String cellText = table.getRows().get(i).get(0).getText();
+            int columnIndex = PROJECT_DETAILS_COLUMNS.indexOf(cellText);
+
+            if (columnIndex != -1) {
+                columns.set(columnIndex, true);
+            }
+        }
+
+        return columns.stream().allMatch(col -> col);
     }
 
     public List<FilePage> extract(boolean cleanPages) throws IOException {
         ObjectExtractor extractor = new ObjectExtractor(document);
         PageIterator pageIterator = extractor.extract();
         List<FilePage> filePages = new ArrayList<>();
-
         if (cleanPages) {
             // Determine the dimensions of the PDF page
-            PDRectangle mediaBox = document.getPage(0).getMediaBox();
             List<RectangleRegion> regions = getRectangleRegions(mediaBox);
 
-            PDAcroForm acroForm = document.getDocumentCatalog().getAcroForm();
-            PDType0Font font = PDType0Font.load(document, new FileInputStream("C:/Windows/Fonts/Arial.ttf"), false);
+            displayFormData();
 
-            acroForm.getDefaultResources().put(COSName.getPDFName("F3"), font);
-
-            int idCounter = 1;
-
-            replaceButtonsWithTextFields(acroForm);
-            for (PDField field : acroForm.getFields()) {
-                String uniqueId = ".)-&f" + idCounter++;
-                PDRectangle rectangle = field.getWidgets().get(0).getRectangle();
-                float yFromTop = mediaBox.getHeight() - rectangle.getUpperRightY();
-
-                if (field instanceof PDTextField && doesTextOverflow(field) ) {
-                    formData.put(uniqueId, new Field(rectangle.getLowerLeftX(), yFromTop, rectangle.getWidth(), rectangle.getHeight(), field.getValueAsString(), getFieldPageIndex(field)));
-                    field.setValue(uniqueId);
-                }
-            }
-
-
-            acroForm.flatten();
-            Map<String, Set<RectangleRegion>> duplicates = findRepetitiveLinesAndPatterns(document, regions);
+            Map<String, Set<RectangleRegion>> duplicates = findRepetitiveLinesAndPatterns(regions);
 
             while (pageIterator.hasNext()) {
                 Page page = pageIterator.next();
-                filePages.add(new FilePage(getPdfPageText(document, page, duplicates), page.getPageNumber()));
+                filePages.add(new FilePage(getPdfPageText(page, duplicates), page.getPageNumber()));
             }
         } else {
             while (pageIterator.hasNext()) {
                 Page page = pageIterator.next();
-                filePages.add(new FilePage(getPdfPageText(document, page), page.getPageNumber()));
+                filePages.add(new FilePage(getPdfPageText(page), page.getPageNumber()));
             }
         }
 
         return filePages;
     }
 
-    public void replaceButtonsWithTextFields(PDAcroForm acroForm) throws IOException {
-        int idCounter = 1;
-        List<PDField> fieldsToRemove = new ArrayList<>();
+    private void displayFormData() throws IOException {
+        PDAcroForm acroForm = document.getDocumentCatalog().getAcroForm();
+        if (acroForm == null) return;
+        int counter = 1;
 
         for (PDField field : acroForm.getFields()) {
-            PDRectangle rectangle = field.getWidgets().get(0).getRectangle();
-
-            String textFieldValue = "";
-
-            if (field instanceof PDCheckBox) {
-                PDCheckBox checkBox = (PDCheckBox) field;
-                textFieldValue = checkBox.isChecked() ? "Checked" : "Unchecked";
-                fieldsToRemove.add(field);  // Отмечаем для удаления после
-            } else if (field instanceof PDRadioButton) {
-                PDRadioButton radioButton = (PDRadioButton) field;
-                textFieldValue = radioButton.getValueAsString();
-                fieldsToRemove.add(field);  // Отмечаем для удаления после
-            }
-
-            // Создаем новое текстовое поле с таким же расположением
-            PDTextField textField = new PDTextField(acroForm);
-            textField.setPartialName("TextField_" + idCounter++);
-            textField.setValue(textFieldValue);
-
-            // Настраиваем виджет для нового текстового поля
-            textField.getWidgets().get(0).setRectangle(rectangle);
-            textField.getWidgets().get(0).setPage(field.getWidgets().get(0).getPage()); // Настраиваем страницу виджета
-
-            // Добавляем новое текстовое поле в форму
-            acroForm.getFields().add(textField);
-        }
-
-        // Удаление старых кнопок, после того как новые текстовые поля добавлены
-        for (PDField field : fieldsToRemove) {
-            acroForm.getFields().remove(field);
-        }
-    }
-
-    private List<Field> convertToFields(List<PDField> fields, PDRectangle mediaBox) {
-        return fields.stream().map(field -> {
+            String uniqueId = String.format("%s%d", FORM_DATA_PREFIX, counter); // Generate the unique ID before processing
             PDRectangle rectangle = field.getWidgets().get(0).getRectangle();
             float yFromTop = mediaBox.getHeight() - rectangle.getUpperRightY();
-            if (field instanceof PDTextField) {
-                try {
-                    return new Field(rectangle.getLowerLeftX(), yFromTop, rectangle.getWidth(), rectangle.getHeight(), field.getValueAsString(), getFieldPageIndex(field));
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
+
+            float fontSize = 10;
+
+            if (field instanceof PDCheckBox) {
+                formData.put(uniqueId, new Field(rectangle.getLowerLeftX(), yFromTop, rectangle.getWidth(), rectangle.getHeight(), ((PDCheckBox) field).isChecked() ? "[x]" : "[ ]", getFieldPageIndex(field)));
+                writeFieldInPDF(fontSize, rectangle.getLowerLeftX(), yFromTop, uniqueId, formData.get(uniqueId).pageIndex);
+
+            } else if (field instanceof PDRadioButton) {
+                PDRadioButton radioButton = (PDRadioButton) field;
+                String selectedValue = radioButton.getValueAsString();
+                List<PDAnnotationWidget> widgets = radioButton.getWidgets();
+
+                for (PDAnnotationWidget widget : widgets) {
+                    String buttonLabel = widget.getAppearanceState().getName();
+                    String displayValue = buttonLabel.equals(selectedValue) ? "(x)" : "( )";
+                    PDRectangle widgetRect = widget.getRectangle();
+                    float yFromTopw = mediaBox.getHeight() - widgetRect.getUpperRightY();
+                    formData.put(uniqueId, new Field(widgetRect.getLowerLeftX(), yFromTopw, widgetRect.getWidth(), widgetRect.getHeight(), displayValue, getFieldPageIndex(field)));
+
+                    writeFieldInPDF(fontSize, widgetRect.getLowerLeftX(), yFromTopw, uniqueId, formData.get(uniqueId).pageIndex);
+                    counter++;
+                    uniqueId = String.format("%s%d", FORM_DATA_PREFIX, counter);
                 }
-            } else if (field instanceof PDCheckBox) {
-                PDCheckBox checkBox = (PDCheckBox) field;
-                try {
-                    return new Field(rectangle.getLowerLeftX(), yFromTop, rectangle.getWidth(), rectangle.getHeight(), checkBox.isChecked() ? "Checked" : "Unchecked", getFieldPageIndex(field));
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
+
+            } else if (field instanceof PDComboBox) {
+                PDComboBox comboBox = (PDComboBox) field;
+                List<String> options = comboBox.getOptionsExportValues();
+                List<String> values = comboBox.getOptionsDisplayValues();
+
+                int index = options.indexOf(comboBox.getValue().get(0));
+
+                String selectedValue = values.get(index);
+
+                formData.put(uniqueId, new Field(rectangle.getLowerLeftX(), yFromTop, rectangle.getWidth(), rectangle.getHeight(), selectedValue, getFieldPageIndex(field)));
+
+                writeFieldInPDF(fontSize, rectangle.getLowerLeftX(), yFromTop, uniqueId, formData.get(uniqueId).pageIndex);
+
+            } else {
+                if (field instanceof PDTextField) {
+                    fontSize = getFontSizeFromDA(((PDTextField) field).getDefaultAppearance());
+                    if (fontSize == 0) {
+                        fontSize = 10;
+                    }
                 }
-            }
-            return null;
-        }).collect(Collectors.toList());
-    }
 
-    private boolean doesTextOverflow(PDField field) {
-        if (field instanceof PDTextField) {
-            PDTextField textField = (PDTextField) field;
-
-            // Получаем размер шрифта из DA строки
-            float fontSize = getFontSizeFromDA(textField.getDefaultAppearance());
-            if (fontSize == 0) {
-                fontSize = 12;
+                formData.put(uniqueId, new Field(rectangle.getLowerLeftX(), yFromTop, rectangle.getWidth(), rectangle.getHeight(), field.getValueAsString(), getFieldPageIndex(field)));
+                writeFieldInPDF(fontSize, rectangle.getLowerLeftX(), yFromTop, uniqueId, formData.get(uniqueId).pageIndex);
             }
 
-            float leading = fontSize * 1.2f;
-
-            PDRectangle widgetRectangle = textField.getWidgets().get(0).getRectangle();
-            float widgetWidth = widgetRectangle.getWidth();
-            float widgetHeight = widgetRectangle.getHeight();
-
-            // Получаем текст из поля
-            String[] lines = textField.getValueAsString().split("\n");
-
-            int numberOfLines = 0;
-
-            // Рассчитываем ширину каждой строки текста
-            for (String line : lines) {
-                float lineWidth = getTextWidth(line, fontSize);
-                if (lineWidth > widgetWidth) {
-                    // Если строка слишком длинная, разбиваем ее на несколько строк
-                    numberOfLines += Math.ceil(lineWidth / widgetWidth);
-                } else {
-                    numberOfLines++;
-                }
-            }
-
-            // Рассчитываем общую высоту текста с учетом межстрочного интервала
-            float textHeight = numberOfLines * leading;
-
-            // Проверяем, превышает ли высота текста высоту виджета
-            return textHeight > widgetHeight + 1.2f;
+            counter++;
         }
-        return false;
     }
 
-    private float getTextWidth(String text, float fontSize) {
-        // Здесь можно использовать примерное значение ширины символов
-        // В идеале лучше использовать метод для точного расчета ширины текста с учетом конкретного шрифта
-        float averageCharWidth = fontSize * 0.5f; // Примерная ширина символа
-        return text.length() * averageCharWidth;
-    }
+    private void writeFieldInPDF(float fontSize, float x, float y, String text, int pageIndex) throws IOException {
+        PDPage page = document.getPage(pageIndex);
+        try (PDPageContentStream contentStream = new PDPageContentStream(document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
+            contentStream.beginText();
+            contentStream.setFont(PDType1Font.TIMES_ROMAN, 1); // tiny text
+            contentStream.setTextMatrix(Matrix.getTranslateInstance(x, page.getMediaBox().getHeight() - y - fontSize / 2));
 
+            contentStream.showText(text);
+            contentStream.endText();
+        }
+    }
     private float getFontSizeFromDA(String da) {
         // String Example DA: "/F3 10 Tf 0 g"
         if (da == null) return 0.0f;
@@ -264,7 +242,7 @@ public class PdfTextExtractor {
     }
 
     @SneakyThrows
-    private String getPdfPageText(PDDocument document, Page page) {
+    private String getPdfPageText(Page page) {
         PDFTextStripper pdfStripper = new PDFTextStripper();
         pdfStripper.setStartPage(page.getPageNumber());
         pdfStripper.setEndPage(page.getPageNumber());
@@ -272,7 +250,15 @@ public class PdfTextExtractor {
     }
 
     @SneakyThrows
-    private String getPdfPageText(PDDocument document, Page page, Map<String, Set<RectangleRegion>> duplicates) {
+    private String getPdfPageText(int pageNumber) {
+        PDFTextStripper pdfStripper = new PDFTextStripper();
+        pdfStripper.setStartPage(pageNumber);
+        pdfStripper.setEndPage(pageNumber);
+        return pdfStripper.getText(document);
+    }
+
+    @SneakyThrows
+    private String getPdfPageText(Page page, Map<String, Set<RectangleRegion>> duplicates) {
         return getPageText(document, page, duplicates);
     }
 
@@ -331,23 +317,6 @@ public class PdfTextExtractor {
         return removeExtraEmptyLines(extractedText).trim() + "\n";
     }
 
-    private boolean isFieldOnPage(PDField field, int pageIndex) throws IOException {
-        return getFieldPageIndex(field) == pageIndex;
-    }
-
-    private Field extractField(PDField field, PDRectangle mediaBox) throws IOException {
-        PDRectangle rectangle = field.getWidgets().get(0).getRectangle();
-        float yFromTop = mediaBox.getHeight() - rectangle.getUpperRightY();
-        if (field instanceof PDTextField) {
-            return new Field(rectangle.getLowerLeftX(), yFromTop, rectangle.getWidth(), rectangle.getHeight(), field.getValueAsString(), getFieldPageIndex(field));
-        } else if (field instanceof PDCheckBox) {
-            PDCheckBox checkBox = (PDCheckBox) field;
-            return new Field(rectangle.getLowerLeftX(), yFromTop, rectangle.getWidth(), rectangle.getHeight(), checkBox.isChecked() ? "Checked" : "Unchecked", getFieldPageIndex(field));
-        }
-
-        return null;
-    }
-
     @Data
     @AllArgsConstructor
     private static class Field {
@@ -359,7 +328,7 @@ public class PdfTextExtractor {
         private int pageIndex;
     }
 
-    private Map<String, Set<RectangleRegion>> findRepetitiveLinesAndPatterns(PDDocument document, List<RectangleRegion> regions) throws IOException {
+    private Map<String, Set<RectangleRegion>> findRepetitiveLinesAndPatterns(List<RectangleRegion> regions) throws IOException {
         Map<String, LineInfo> commonLines = new HashMap<>();
 
         // Add all regions to the PDFTextStripperByArea
@@ -438,6 +407,10 @@ public class PdfTextExtractor {
 
         for (Table table : tables) {
             // Skip invalid tables
+            if (isSselDocument && isQuestionTable(table)) {
+                pdfTables.add(selectQuestion(table));
+                continue;
+            }
             if (!isValidTable(table)) {
                 continue;
             }
@@ -476,25 +449,51 @@ public class PdfTextExtractor {
         return pdfTables;
     }
 
+    private PdfTable selectQuestion(Table table) {
+        PdfTable pdfTable = new PdfTable(
+                (float) table.getX(),
+                (float) table.getY(),
+                (float) (table.getX() + table.getWidth()),
+                (float) (table.getY() + table.getHeight())
+        );
+
+        pdfTable.setText(QUESTION_START_PREFIX + table.getRows().get(0).get(0).getText());
+
+        return pdfTable;
+    }
+
+    private boolean isQuestionTable(Table table) {
+        return table != null && table.getRows().size() == 1 && table.getRows().get(0).size() == 1 && isQuestionFormat(table.getRows().get(0).get(0).getText());
+    }
+
+    private boolean isQuestionFormat(String text) {
+        // Example: 1.4.3 Question1?
+        String regex = "^\\d+(\\.\\d+)*\\s\\w+";
+        Pattern pattern = Pattern.compile(regex);
+        return pattern.matcher(text).find();
+    }
+
     private void appendRowToTableString(
             StringBuilder tableStr,
             List<RectangularTextContainer> row,
             Page page,
             List<String> tableFormDatas) throws IOException {
         for (RectangularTextContainer cell : row) {
-            String formKey = getFormKeyInsideCell(cell, page.getPageNumber());
-            if (formKey != null) {
-                tableFormDatas.add(formKey);
-                tableStr.append("| ").append(formData.get(formKey).getText().replaceAll("\\r?\\n", " ")).append(" ");
+            List<String> formKeys = getFormKeysInsideCell(cell, page.getPageNumber());
+            String cellText = getTextByTextArea(cell, page).trim().replaceAll("\\r?\\n", " ");
+            if (!formKeys.isEmpty()) {
+                for (String key: formKeys) {
+                    tableFormDatas.add(key);
+                    cellText = cellText.replace(key, formData.get(key).getText().trim().replaceAll("\\r?\\n", " "));
+                }
             } else {
-                String cellText = getTextByTextArea(cell, page).trim().replaceAll("\\r?\\n", " ");
                 for (String key: tableFormDatas) {
                     if (cellText.contains(key)) {
-                        cellText.replace(key, "");
+                        cellText = cellText.replace(key, "");
                     }
                 }
-                tableStr.append("| ").append(cellText).append(" ");
             }
+            tableStr.append("| ").append(cellText).append(" ");
         }
         tableStr.append("|\n");
     }
@@ -505,18 +504,19 @@ public class PdfTextExtractor {
         return prevCell.getX() + prevCell.getWidth() - 1 > currentCell.getX();
     }
 
-    private String getFormKeyInsideCell(RectangularTextContainer cell, int pageNumber) {
+    private List<String> getFormKeysInsideCell(RectangularTextContainer cell, int pageNumber) {
 
+        List<String> keys = new ArrayList<>();
         for (String key: formData.keySet()) {
             Field field = formData.get(key);
             if (field.getPageIndex() == pageNumber - 1 && cell.getX() <= field.getX()
                     && cell.getY() <= field.getY()
                     && (cell.getX() + cell.getWidth()) >= (field.getX() + field.getWidth())
                     && (cell.getY() + cell.getHeight()) >= (field.getY() + field.getHeight())) {
-                return key;
+                keys.add(key);
             }
         }
-        return null;
+        return keys;
     }
 
     private boolean isRowTextEmpty(List<RectangularTextContainer> row) {

@@ -15,7 +15,8 @@ public class PdfWriter {
         for (File file : filesArray) {
             files.add(file.getName());
         }
-        String fileName = "Project_6030+section+1.pdf";
+        Map<String, Boolean> testMap = new HashMap<>();
+        String fileName = "Project_6030.pdf";
         if (fileName == null) {
             long start = System.currentTimeMillis();
             for (String file : files) {
@@ -24,9 +25,9 @@ public class PdfWriter {
                 try (FileWriter writer = new FileWriter(outputFile)) {
 
                     PdfTextExtractor pdfExtractor = new PdfTextExtractor(document);
+                    testMap.put(file, pdfExtractor.isSselDocument());
                     List<FilePage> pages = pdfExtractor.extract(true);
                     for (FilePage page : pages) {
-
                         writer.write(page.getText());
                     }
                     document.close();
@@ -36,12 +37,15 @@ public class PdfWriter {
             }
             long end = System.currentTimeMillis();
             System.out.println(fileName + "processed. Executed time: " + (double)(end - start)/1000 + "s");
+            System.out.println(testMap);
         } else {
             PDDocument document = PDDocument.load(new File("./test/" + fileName));
+
 //            test(document);
             File outputFile = new File("./output1/" + fileName.replaceAll(".pdf", ".md"));
             try(FileWriter writer = new FileWriter(outputFile)) {
                 PdfTextExtractor pdfExtractor = new PdfTextExtractor(document);
+                boolean isSsel = pdfExtractor.isSselDocument();
                 long start = System.currentTimeMillis();
                 List<FilePage> pages  = pdfExtractor.extract(true);
                 long end = System.currentTimeMillis();
