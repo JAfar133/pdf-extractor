@@ -2,6 +2,7 @@ package org.example;
 import java.awt.geom.Rectangle2D;
 import java.io.IOException;
 import java.util.*;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -42,12 +43,12 @@ public class PdfTextExtractor {
     // Levenshtein distance calculator for string similarity
     private static final LevenshteinDistance levenshteinDistance = new LevenshteinDistance();
     private static final boolean convertTableToReadableFormat = true;
-    private static final boolean tablesWithHeader = true;
+    private static final boolean tablesWithHeader = false;
     private final PDFTextStripperByArea stripperByArea;
     private final PDDocument document;
     private final PDRectangle mediaBox;
     private final ExtractionAlgorithm tableExtractionAlgorithm;
-    private final Map<String, Field> formData = new HashMap<>();
+    private final Map<String, FormField> formData = new HashMap<>();
     private final String FORM_DATA_PREFIX = ".)-&f*?5%f"; // Prefix for generating unique identifiers
     private final String QUESTION_START_PREFIX = "#%*&q1v1\r";
     private final boolean isSselDocument;
@@ -57,7 +58,7 @@ public class PdfTextExtractor {
         this.stripperByArea = new PDFTextStripperByArea();
         this.tableExtractionAlgorithm = new SpreadsheetExtractionAlgorithm().withMinSpacingBetweenRulings(MIN_TABLE_CELL_HEIGHT_AND_WIDTH);
         this.mediaBox = document.getPage(0).getMediaBox();
-        this.isSselDocument = hasTableOfContentPage() && hasTableOfContentPage();
+        this.isSselDocument = hasTableOfContentPage() && hasProjectDetailsPage();
     }
 
     public boolean isSselDocument() {
@@ -101,7 +102,7 @@ public class PdfTextExtractor {
             // Determine the dimensions of the PDF page
             List<RectangleRegion> regions = getRectangleRegions(mediaBox);
 
-            displayFormData();
+            processFormData();
 
             Map<String, Set<RectangleRegion>> duplicates = findRepetitiveLinesAndPatterns(regions);
 
@@ -119,7 +120,7 @@ public class PdfTextExtractor {
         return filePages;
     }
 
-    private void displayFormData() throws IOException {
+    private void processFormData() throws IOException {
         PDAcroForm acroForm = document.getDocumentCatalog().getAcroForm();
         if (acroForm == null) return;
         int counter = 1;
@@ -132,7 +133,13 @@ public class PdfTextExtractor {
             float fontSize = 10;
 
             if (field instanceof PDCheckBox) {
-                formData.put(uniqueId, new Field(rectangle.getLowerLeftX(), yFromTop, rectangle.getWidth(), rectangle.getHeight(), ((PDCheckBox) field).isChecked() ? "[x]" : "[ ]", getFieldPageIndex(field)));
+                formData.put(uniqueId, new FormField(
+                        rectangle.getLowerLeftX(),
+                        yFromTop,
+                        rectangle.getWidth(),
+                        rectangle.getHeight(),
+                        ((PDCheckBox) field).isChecked() ? "[x]" : "[ ]",
+                        getFieldPageIndex(field)));
                 writeFieldInPDF(fontSize, rectangle.getLowerLeftX(), yFromTop, uniqueId, formData.get(uniqueId).pageIndex);
 
             } else if (field instanceof PDRadioButton) {
@@ -145,7 +152,7 @@ public class PdfTextExtractor {
                     String displayValue = buttonLabel.equals(selectedValue) ? "(x)" : "( )";
                     PDRectangle widgetRect = widget.getRectangle();
                     float yFromTopw = mediaBox.getHeight() - widgetRect.getUpperRightY();
-                    formData.put(uniqueId, new Field(widgetRect.getLowerLeftX(), yFromTopw, widgetRect.getWidth(), widgetRect.getHeight(), displayValue, getFieldPageIndex(field)));
+                    formData.put(uniqueId, new FormField(widgetRect.getLowerLeftX(), yFromTopw, widgetRect.getWidth(), widgetRect.getHeight(), displayValue, getFieldPageIndex(field)));
 
                     writeFieldInPDF(fontSize, widgetRect.getLowerLeftX(), yFromTopw, uniqueId, formData.get(uniqueId).pageIndex);
                     counter++;
@@ -161,7 +168,7 @@ public class PdfTextExtractor {
 
                 String selectedValue = values.get(index);
 
-                formData.put(uniqueId, new Field(rectangle.getLowerLeftX(), yFromTop, rectangle.getWidth(), rectangle.getHeight(), selectedValue, getFieldPageIndex(field)));
+                formData.put(uniqueId, new FormField(rectangle.getLowerLeftX(), yFromTop, rectangle.getWidth(), rectangle.getHeight(), selectedValue, getFieldPageIndex(field)));
 
                 writeFieldInPDF(fontSize, rectangle.getLowerLeftX(), yFromTop, uniqueId, formData.get(uniqueId).pageIndex);
 
@@ -173,7 +180,7 @@ public class PdfTextExtractor {
                     }
                 }
 
-                formData.put(uniqueId, new Field(rectangle.getLowerLeftX(), yFromTop, rectangle.getWidth(), rectangle.getHeight(), field.getValueAsString(), getFieldPageIndex(field)));
+                formData.put(uniqueId, new FormField(rectangle.getLowerLeftX(), yFromTop, rectangle.getWidth(), rectangle.getHeight(), field.getValueAsString(), getFieldPageIndex(field)));
                 writeFieldInPDF(fontSize, rectangle.getLowerLeftX(), yFromTop, uniqueId, formData.get(uniqueId).pageIndex);
             }
 
@@ -319,7 +326,7 @@ public class PdfTextExtractor {
 
     @Data
     @AllArgsConstructor
-    private static class Field {
+    private static class FormField {
         private float x;
         private float y;
         private float width;
@@ -433,7 +440,7 @@ public class PdfTextExtractor {
 
             for (List<RectangularTextContainer> row : rows) {
                 if (row.isEmpty() || isRowTextEmpty(row)) continue;
-                appendRowToTableString(tableStr, row, page, tableFormDatas);
+                appendRowToTableString(tableStr, row, page, tableFormDatas, !isSselDocument || row.size() != 1);
                 if (isFirstRow) {
                     if (tablesWithHeader) {
                         appendHeaderSeparator(tableStr, row.size());
@@ -473,11 +480,32 @@ public class PdfTextExtractor {
         return pattern.matcher(text).find();
     }
 
+    private boolean isCheckBoxAnswer(String text) {
+        String regex = "^(\\[\\s+\\]|\\[x\\])\\s.*";
+        return text.matches(regex);
+    }
+
+    private boolean isRadioButtonAnswer(String text) {
+        String regex = "^(\\(\\s+\\)|\\(o\\))\\s.*";
+        return text.matches(regex);
+    }
+
+    private boolean isCheckBoxSelected(String text) {
+        String regex = "^\\[x\\]\\s.*";
+        return text.matches(regex);
+    }
+
+    private boolean isRadioButtonSelected(String text) {
+        String regex = "^\\(o\\)\\s.*";
+        return text.matches(regex);
+    }
+
     private void appendRowToTableString(
             StringBuilder tableStr,
             List<RectangularTextContainer> row,
             Page page,
-            List<String> tableFormDatas) throws IOException {
+            List<String> tableFormDatas,
+            boolean useSeparator) throws IOException {
         for (RectangularTextContainer cell : row) {
             List<String> formKeys = getFormKeysInsideCell(cell, page.getPageNumber());
             String cellText = getTextByTextArea(cell, page).trim().replaceAll("\\r?\\n", " ");
@@ -492,23 +520,50 @@ public class PdfTextExtractor {
                         cellText = cellText.replace(key, "");
                     }
                 }
+                if(isCheckBoxAnswer(cellText)) {
+                    if (!isCheckBoxSelected(cellText)) {
+                        continue;
+                    }
+                } else if (isRadioButtonAnswer(cellText)) {
+                    String answer = extractRadioButtonAnswer(cellText);
+                    if (answer == null) {
+                        cellText = "";
+                    } else {
+                        cellText = answer;
+                    }
+                }
             }
-            tableStr.append("| ").append(cellText).append(" ");
+            if (useSeparator) {
+                tableStr.append("| ").append(cellText).append(" ");
+            } else {
+                tableStr.append(cellText).append(" ");
+            }
+
         }
-        tableStr.append("|\n");
+        if (useSeparator) {
+            tableStr.append("|\n");
+        } else {
+            tableStr.append("\n");
+        }
+
     }
 
-    private boolean isCellIntersect(RectangularTextContainer currentCell, RectangularTextContainer prevCell) {
-        if (currentCell == prevCell) return false;
+    private String extractRadioButtonAnswer(String cellText) {
+        Pattern pattern = Pattern.compile("\\(o\\)\\s[^()]+");
+        Matcher matcher = pattern.matcher(cellText);
 
-        return prevCell.getX() + prevCell.getWidth() - 1 > currentCell.getX();
+        if(matcher.find()) {
+            return matcher.group().trim();
+        }
+
+        return null;
     }
 
     private List<String> getFormKeysInsideCell(RectangularTextContainer cell, int pageNumber) {
 
         List<String> keys = new ArrayList<>();
         for (String key: formData.keySet()) {
-            Field field = formData.get(key);
+            FormField field = formData.get(key);
             if (field.getPageIndex() == pageNumber - 1 && cell.getX() <= field.getX()
                     && cell.getY() <= field.getY()
                     && (cell.getX() + cell.getWidth()) >= (field.getX() + field.getWidth())
@@ -530,20 +585,6 @@ public class PdfTextExtractor {
 
         stripperByArea.extractRegions(document.getPage(page.getPageNumber() - 1));
         return stripperByArea.getTextForRegion(regionName);
-    }
-
-
-    // Check if all cells are in the same row and in height
-    private boolean isCellsInOneRow(List<RectangularTextContainer> cells) {
-        List<RectangularTextContainer> filteredCells = filterRow(cells);
-        if (filteredCells.size() <= 1) {
-            return true;
-        }
-        double firstY = filteredCells.get(0).getY();
-        double firstHeight = filteredCells.get(0).getHeight();
-        return filteredCells.stream().allMatch(cell ->
-                cell.getY() == firstY && cell.getHeight() == firstHeight
-        );
     }
 
     // Remove empty cells
@@ -590,17 +631,8 @@ public class PdfTextExtractor {
         return POTENTIAL_EXTRA_BODY_LINES.stream().anyMatch(ll -> levenshteinDistance.getDistance(ll, line.trim()) >= SIMILARITY_THRESHOLD);
     }
 
-    // Exclude TextChunk cells
-    private List<RectangularTextContainer> filterRow(List<RectangularTextContainer> row) {
-        return row.stream().filter(cell -> cell instanceof Cell).collect(Collectors.toList());
-    }
-
     private void appendHeaderSeparator(StringBuilder tableStr, int columnCount) {
         tableStr.append("|---".repeat(columnCount)).append("|\n");
-    }
-
-    private float getRowWidth(List<RectangularTextContainer> row) {
-        return (float) row.stream().mapToDouble(RectangularTextContainer::getWidth).sum();
     }
 
     private boolean isValidTable(Table table) {
@@ -609,8 +641,8 @@ public class PdfTextExtractor {
         }
         // Checking that the table contains more than one non-empty row
         // and at least one row contains more than one non-empty cell
-        return table.getRows().stream().filter(row -> !cleanRow(row).isEmpty()).count() > 1
-                && table.getRows().stream().anyMatch(row -> cleanRow(row).size() > 1);
+        return table.getRows().stream().anyMatch(row -> !cleanRow(row).isEmpty());
+//                && table.getRows().stream().anyMatch(row -> cleanRow(row).size() > 1);
     }
 
     @Getter

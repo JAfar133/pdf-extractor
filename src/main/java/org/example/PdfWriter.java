@@ -1,11 +1,15 @@
 package org.example;
 
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
 import org.apache.pdfbox.cos.COSDictionary;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.util.*;
+import java.util.regex.Pattern;
 
 public class PdfWriter {
     public static void main(String[] args) throws IOException {
@@ -45,9 +49,9 @@ public class PdfWriter {
             File outputFile = new File("./output1/" + fileName.replaceAll(".pdf", ".md"));
             try(FileWriter writer = new FileWriter(outputFile)) {
                 PdfTextExtractor pdfExtractor = new PdfTextExtractor(document);
-                boolean isSsel = pdfExtractor.isSselDocument();
                 long start = System.currentTimeMillis();
                 List<FilePage> pages  = pdfExtractor.extract(true);
+                List<FileChunk> chunks = splitSselDocumentToChunks(pages, pdfExtractor.getQuestionStartPrefix());
                 long end = System.currentTimeMillis();
                 System.out.println(fileName + "processed. Executed time: " + (double)(end - start)/1000 + "s");
                 for (FilePage page: pages) {
@@ -60,7 +64,45 @@ public class PdfWriter {
 
     }
 
-    public static void test(PDDocument document) {
-        COSDictionary doc = document.getDocumentCatalog().getPages().getCOSObject();
+    public static List<FileChunk> splitSselDocumentToChunks(List<FilePage> filePages, String questionStartPrefix) {
+        List<FileChunk> chunks = new ArrayList<>();
+        StringBuilder currentChunk = new StringBuilder();
+        int chunkStartPageNumber = -1;
+
+        for (FilePage page : filePages) {
+            String[] parts = page.getText().split(Pattern.quote(questionStartPrefix));
+
+            for (int i = 0; i < parts.length; i++) {
+                if (i == 0) {
+                    if (currentChunk.length() > 0) {
+                        currentChunk.append(parts[i]);
+                    } else {
+                        currentChunk.append(parts[i]);
+                        chunkStartPageNumber = page.getPageNumber();
+                    }
+                } else {
+                    if (chunkStartPageNumber != 1) {
+                        chunks.add(new FileChunk(currentChunk.toString().trim(), chunkStartPageNumber));
+                    }
+                    currentChunk.setLength(0);
+                    currentChunk.append(parts[i]);
+                    chunkStartPageNumber = page.getPageNumber();
+                }
+            }
+        }
+
+        if (currentChunk.length() > 0) {
+            chunks.add(new FileChunk(currentChunk.toString().trim(), chunkStartPageNumber));
+        }
+
+        return chunks;
+    }
+
+    @Data
+    @AllArgsConstructor
+    @NoArgsConstructor
+    public static class FileChunk {
+        private String text;
+        private int pageNumber;
     }
 }
